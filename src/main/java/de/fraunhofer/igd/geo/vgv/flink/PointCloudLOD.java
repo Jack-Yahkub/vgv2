@@ -1,6 +1,5 @@
 package de.fraunhofer.igd.geo.vgv.flink;
 
-
 import de.fraunhofer.igd.geo.vgv.flink.FirstLayerMapper;
 import de.fraunhofer.igd.geo.vgv.flink.NthLayerMapper;
 
@@ -8,12 +7,15 @@ import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.GroupReduceFunction;
+import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.tuple.Tuple2;
+
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.utils.ParameterTool;
 import java.lang.Math;
+import java.util.Iterator;
 import org.apache.flink.core.fs.FileSystem;
 public class PointCloudLOD {
     public static void main(String... args) throws Exception {
@@ -27,10 +29,8 @@ public class PointCloudLOD {
 
         // set up execution environment
         ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-        // TODO
+        // 1. Bounding box computation
 	DataSet<String> lines = env.readTextFile(args[1]);
-//	double boundingBox = new double[3][2];
-//	DataSet<double[3][2]> 
         double boundingBox[][] = lines
 	.map(new MapFunction<String,double[][]>() {
 		@Override
@@ -44,6 +44,8 @@ public class PointCloudLOD {
 			return xyz2;
 		}
 	})
+	// Compare the maxima and minima in x,y,z coordinates of points 0 to n-1 with the x,y,z
+	// coordinates of point n and update maxima and minima if applicable
 	.reduce(new ReduceFunction<double[][]>() {
 		@Override
 		public double[][] reduce(double[][] xyz21, double[][] xyz22){
@@ -71,6 +73,7 @@ public class PointCloudLOD {
 		}
 	})
 	.collect().get(0);
+	// Print bounding box to standard output
 	System.out.println("\t x \t y \t z");
 	for(int i = 0; i < 2; i++){
 		for(int j = 0; j < 3; j++){
@@ -78,77 +81,98 @@ public class PointCloudLOD {
 		}
 		System.out.println();
 	}
-
+	// Handle the first layer
+	// 2. and 3. Construct an implicit grid by assigning integers to each point that designate the
+	// placement of the point within the grid using Morton-Code 
 	int layer = 0;
-
 		DataSet<Tuple2<Integer,String>> groupedPoints = lines
-		.map(new FirstLayerMapper(boundingBox));
-		groupedPoints
+		.map(new FirstLayerMapper(boundingBox))
+		// 4. Group points that share the same cell
 		.groupBy(0)
-		.first(100)
-//		.reduceGroup(new GroupReduceFunction<Tuple2<Integer, String>, String>() {
-//			@Override
-//			public void reduce(Iterable<Tuple2<Integer, String>> points, Collector<String> points_file) throws Exception {
-//				String points_lines = "";
-//				for (Tuple2<Integer, String> point : points) {
-//					points_lines += point.f1 + "\n";
-//				}
-//				points_file.collect(points_lines);
-//			}
-//		})
-		.map(new MapFunction<Tuple2<Integer,String>, Tuple2<Integer,String>>() {
+		// 5. Use a GroupReduceFunction to select up to 100 distinct points from within each cell and
+		// mark them for assignment to the current layer
+		.reduceGroup(new GroupReduceFunction<Tuple2<Integer, String>, Tuple2<Integer,String>>() {
 			@Override
-			public Tuple2<Integer,String> map(Tuple2<Integer,String> point) throws Exception {
-				return new Tuple2<>(-1,point.f1);
+			public void reduce(Iterable<Tuple2<Integer, String>> points, Collector<Tuple2<Integer, String>> points_file) throws Exception {
+				String points_lines = "";
+				int linecount = 0;
+				Iterator<Tuple2<Integer,String>> pointsIt = points.iterator();
+				while (pointsIt.hasNext()) {
+					if(linecount < 100){
+						points_file.collect(new Tuple2<>(-1,pointsIt.next().f1));
+					}
+					else{ 
+						points_file.collect(pointsIt.next());
+					}
+					linecount++;
+				}
+			}
+		});
+		// 8. Select the marked points by filtering and write them to file
+		groupedPoints
+		.filter(new FilterFunction<Tuple2<Integer,String>>(){
+			@Override
+			public boolean filter(Tuple2<Integer,String> point){
+				return point.f0.equals(-1);
 			}
 		})
 		.writeAsFormattedText("layer"+layer+".xyz",FileSystem.WriteMode.OVERWRITE, element -> element.f1).setParallelism(1);
-	while(true){
-		layer++;
+		// Remove points that have been written to the first layer
 		groupedPoints = groupedPoints
 		.filter(new FilterFunction<Tuple2<Integer,String>>(){
 			@Override
 			public boolean filter(Tuple2<Integer,String> point){
 				return !point.f0.equals(-1);
 			}
-		})
-		.map(new NthLayerMapper(boundingBox, layer));
-		System.out.println(groupedPoints.count());
-		groupedPoints	
+		});
+
+	// 7. Handle the remaining layers
+	while(true){
+		layer++;
+		// 6. Each layer is divided horizontally and vertically and points are assigned to their cells 
+		// in NthLayerMapper
+		groupedPoints
+		.map(new NthLayerMapper(boundingBox, layer))
+		// 4. Group points of the current layer
 		.groupBy(0)
-		.first(100)
-//		.reduceGroup(new GroupReduceFunction<Tuple2<Integer,String>, String>() {
-//			@Override
-//			public void reduce(Iterable<Tuple2<Integer, String>> points, Collector<String> points_file) throws Exception {
-//				String points_lines = "";
-//				for (Tuple2<Integer, String> point : points) {
-//					points_lines += point.f1 + "\n";
-//				}
-//				points_file.collect(points_lines);
-//			}
-//		})
-		.map(new MapFunction<Tuple2<Integer,String>, Tuple2<Integer,String>>() {
+		// 5. Select up to 100 distinct points from within each cell and mark them for assignment 
+		.reduceGroup(new GroupReduceFunction<Tuple2<Integer, String>, Tuple2<Integer,String>>() {
 			@Override
-			public Tuple2<Integer,String> map(Tuple2<Integer,String> point) throws Exception {
-				return new Tuple2<>(-1,point.f1);
+			public void reduce(Iterable<Tuple2<Integer, String>> points, Collector<Tuple2<Integer, String>> points_file) throws Exception {
+				String points_lines = "";
+				Integer cellID = 0;
+				int linecount = 0;
+				Iterator<Tuple2<Integer,String>> pointsIt = points.iterator();
+				while (pointsIt.hasNext()) {
+					if(linecount < 100){
+						points_file.collect(new Tuple2<>(-1,pointsIt.next().f1));
+					}
+					else{ 
+						points_file.collect(pointsIt.next());
+					}
+					linecount++;
+				}
+			}
+		});
+		// 8. Filtering to write layer to file
+		groupedPoints
+		.filter(new FilterFunction<Tuple2<Integer,String>>(){
+			@Override
+			public boolean filter(Tuple2<Integer,String> point){
+				return point.f0.equals(-1);
 			}
 		})
 		.writeAsFormattedText("layer"+layer+".xyz",FileSystem.WriteMode.OVERWRITE, element -> element.f1).setParallelism(1);
-//		nthLayerPoints.
-//		map(new MapFunction<String, Tuple2<Integer,String>>() {
-//			@Override
-//			public Tuple2<Integer,String> map(String savedPoint) {
-//				return new Tuple2<>(-1, savedPoint);
-//			}
-//		});
-//		.reduceGroup(new GroupReduceFunction<String, String>() {
-//			@Override
-//			public void reduce(Iterable<String> savedPoints, Collector<String> cleared) throws Exception {
-//				cleared.collect("yes");	
-//			}
-//		});
+		// Remove points that have been written to current layer
+		groupedPoints = groupedPoints
+		.filter(new FilterFunction<Tuple2<Integer,String>>(){
+			@Override
+			public boolean filter(Tuple2<Integer,String> point){
+				return !point.f0.equals(-1);
+			}
+		});
 		long remainingPoints = groupedPoints.count();
-		System.out.println(remainingPoints);
+		System.out.println(remainingPoints + " points still remaining for usage in finer layers.");
 		if(remainingPoints == 0) {
 			break;
 		}
