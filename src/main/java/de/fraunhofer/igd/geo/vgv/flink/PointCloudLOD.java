@@ -131,7 +131,7 @@ public class PointCloudLOD {
 		layer++;
 		// 6. Each layer is divided horizontally and vertically and points are assigned to their cells 
 		// in NthLayerMapper
-		groupedPoints
+		DataSet<Tuple2<Integer,String>> assignedPoints = groupedPoints
 		.map(new NthLayerMapper(boundingBox, layer))
 		// 4. Group points of the current layer
 		.groupBy(0)
@@ -155,7 +155,7 @@ public class PointCloudLOD {
 			}
 		});
 		// 8. Filtering to write layer to file
-		groupedPoints
+		assignedPoints
 		.filter(new FilterFunction<Tuple2<Integer,String>>(){
 			@Override
 			public boolean filter(Tuple2<Integer,String> point){
@@ -164,7 +164,7 @@ public class PointCloudLOD {
 		})
 		.writeAsFormattedText("layer"+layer+".xyz",FileSystem.WriteMode.OVERWRITE, element -> element.f1).setParallelism(1);
 		// Remove points that have been written to current layer
-		groupedPoints = groupedPoints
+		groupedPoints = assignedPoints
 		.filter(new FilterFunction<Tuple2<Integer,String>>(){
 			@Override
 			public boolean filter(Tuple2<Integer,String> point){
